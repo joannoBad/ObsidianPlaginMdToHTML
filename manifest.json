@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-plugin-md-to-html",
+  "name": "MD To HTML Italics Checker",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Scans Obsidian notes for underscore-based markdown italics and bold text and converts them to HTML tags.",
+  "author": "joannoBad",
+  "authorUrl": "https://github.com/joannoBad",
+  "isDesktopOnly": false
+}
