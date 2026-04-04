@@ -1,7 +1,7 @@
 {
   "name": "obsidian-plugin-md-to-html",
-  "version": "0.1.0",
-  "description": "Obsidian plugin that finds markdown underscore italics and converts them to HTML <i> tags.",
+  "version": "0.2.0",
+  "description": "Obsidian plugin that finds markdown italics and bold formatting and converts it to HTML tags.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
@@ -25,4 +25,3 @@
     "typescript": "^5.8.3"
   }
 }
-
