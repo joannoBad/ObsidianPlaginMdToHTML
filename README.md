@@ -35,6 +35,22 @@ Obsidian plugin that checks notes for underscore-based markdown formatting and c
 - review all files with issues in one panel
 - open a file or convert it directly from the report
 
+## Screenshots
+
+All note and folder names in the screenshots below are redacted.
+
+![File Explorer badge](./release/screen/screenshot-file-explorer-badge.png)
+File Explorer badge: the orange indicator near a note shows how many markdown formatting issues were found in that file.
+
+![Right-click note actions](./release/screen/screenshot-note-menu-actions.png)
+Right-click menu actions: scan the selected note or convert its markdown formatting to HTML directly from the file menu.
+
+![Plugin enabled](./release/screen/screenshot-plugin-enabled.png)
+Plugin enabled in Community Plugins: this is how the plugin appears in Obsidian settings after installation.
+
+![Hotkeys](./release/screen/screenshot-hotkeys.png)
+Hotkeys: example command bindings for scanning notes, converting formatting, and opening the report view.
+
 ## Development
 
 ```bash
