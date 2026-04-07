@@ -2,6 +2,17 @@
 
 Obsidian plugin that checks notes for markdown formatting and straight double quotes and converts them to HTML tags and guillemets.
 
+## Quick install
+
+1. Download the release archive or copy these files from the project:
+   `manifest.json`, `main.js`, `styles.css`
+2. Put them into your vault here:
+   `.obsidian/plugins/obsidian-plugin-md-to-html/`
+3. Open Obsidian:
+   `Settings -> Community plugins`
+4. Disable `Restricted mode` if needed, then enable the plugin.
+5. Run `Reload plugins` or restart Obsidian.
+
 ## What it does
 
 - scans the active note or the whole vault for underscore-based markdown formatting
