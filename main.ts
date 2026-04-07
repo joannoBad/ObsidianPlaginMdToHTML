@@ -15,6 +15,8 @@ type MatchInfo = {
   value: string;
 };
 
+type IssueType = "markdown" | "quotes";
+
 type MatchLocation = {
   from: { line: number; ch: number };
   to: { line: number; ch: number };
@@ -24,10 +26,13 @@ const INLINE_CODE_PATTERN = /(`[^`]*`)/g;
 const BOLD_PATTERN = /(^|[^\\*])\*\*([^*\n]+?)\*\*(?=($|[^\\*]))/g;
 const ASTERISK_ITALIC_PATTERN = /(^|[^\\*])\*([^*\n]+?)\*(?=($|[^\\*]))/g;
 const UNDERSCORE_ITALIC_PATTERN = /(^|[^\\\w])_([^_\n]+?)_(?=($|[^\w]))/g;
+const QUOTE_PATTERN = /(^|[^\\"])"([^"\n]+?)"(?=($|[^\\"]))/g;
 const BADGE_CLASS = "md-to-html-issue-badge";
 const REPORT_VIEW_TYPE = "md-to-html-report-view";
+const MARKDOWN_MATCHERS = [BOLD_PATTERN, ASTERISK_ITALIC_PATTERN, UNDERSCORE_ITALIC_PATTERN];
+const QUOTE_MATCHERS = [QUOTE_PATTERN];
 
-function convertSegment(segment: string): MatchInfo {
+function convertMarkdownSegment(segment: string): MatchInfo {
   let count = 0;
 
   const boldConverted = segment.replace(
@@ -57,7 +62,24 @@ function convertSegment(segment: string): MatchInfo {
   return { count, value };
 }
 
-function convertMarkdownFormatting(text: string): MatchInfo {
+function convertQuoteSegment(segment: string): MatchInfo {
+  let count = 0;
+
+  const value = segment.replace(
+    QUOTE_PATTERN,
+    (fullMatch, prefix: string, content: string) => {
+      count += 1;
+      return `${prefix}«${content}»`;
+    },
+  );
+
+  return { count, value };
+}
+
+function transformText(
+  text: string,
+  segmentTransformer: (segment: string) => MatchInfo,
+): MatchInfo {
   const lines = text.split("\n");
   let insideFence = false;
   let totalCount = 0;
@@ -78,7 +100,7 @@ function convertMarkdownFormatting(text: string): MatchInfo {
         return part;
       }
 
-      const result = convertSegment(part);
+      const result = segmentTransformer(part);
       totalCount += result.count;
       return result.value;
     });
@@ -92,7 +114,15 @@ function convertMarkdownFormatting(text: string): MatchInfo {
   };
 }
 
-function findFirstMatchLocation(text: string): MatchLocation | null {
+function convertMarkdownFormatting(text: string): MatchInfo {
+  return transformText(text, convertMarkdownSegment);
+}
+
+function convertStraightQuotes(text: string): MatchInfo {
+  return transformText(text, convertQuoteSegment);
+}
+
+function findFirstMatchLocation(text: string, matchers: RegExp[]): MatchLocation | null {
   const lines = text.split("\n");
   let insideFence = false;
 
@@ -119,7 +149,7 @@ function findFirstMatchLocation(text: string): MatchLocation | null {
         continue;
       }
 
-      const matches = [BOLD_PATTERN, ASTERISK_ITALIC_PATTERN, UNDERSCORE_ITALIC_PATTERN]
+      const matches = matchers
         .map((matcher) => {
           matcher.lastIndex = 0;
           const match = matcher.exec(part);
@@ -139,7 +169,8 @@ function findFirstMatchLocation(text: string): MatchLocation | null {
         const prefix = firstMatch.match[1] ?? "";
         const content = firstMatch.match[2] ?? "";
         const startCh = partStart + firstMatch.match.index + prefix.length;
-        const endCh = startCh + content.length + (firstMatch.matcher === BOLD_PATTERN ? 4 : 2);
+        const wrapperLength = firstMatch.matcher === BOLD_PATTERN ? 4 : 2;
+        const endCh = startCh + content.length + wrapperLength;
 
         return {
           from: { line: lineIndex, ch: startCh },
@@ -252,7 +283,8 @@ class MdToHtmlReportView extends ItemView {
 }
 
 export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
-  private issueCounts = new Map<string, number>();
+  private markdownIssueCounts = new Map<string, number>();
+  private quoteIssueCounts = new Map<string, number>();
 
   async onload(): Promise<void> {
     this.registerView(
@@ -324,6 +356,58 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "scan-current-note-straight-quotes",
+      name: "Scan current note for straight quotes",
+      checkCallback: (checking: boolean) => {
+        const file = this.app.workspace.getActiveFile();
+
+        if (!this.isMarkdownFile(file)) {
+          return false;
+        }
+
+        if (!checking) {
+          void this.scanQuotesInFile(file);
+        }
+
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "convert-current-note-straight-quotes",
+      name: "Convert straight quotes in current note to guillemets",
+      checkCallback: (checking: boolean) => {
+        const file = this.app.workspace.getActiveFile();
+
+        if (!this.isMarkdownFile(file)) {
+          return false;
+        }
+
+        if (!checking) {
+          void this.convertQuotesInFile(file);
+        }
+
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "scan-vault-straight-quotes",
+      name: "Scan all notes in vault for straight quotes",
+      callback: () => {
+        void this.scanQuotesInVault();
+      },
+    });
+
+    this.addCommand({
+      id: "convert-vault-straight-quotes",
+      name: "Convert straight quotes to guillemets in all notes",
+      callback: () => {
+        void this.convertQuotesInVault();
+      },
+    });
+
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         this.addFileMenuItems(menu, file);
@@ -354,7 +438,8 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
 
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        this.issueCounts.delete(oldPath);
+        this.markdownIssueCounts.delete(oldPath);
+        this.quoteIssueCounts.delete(oldPath);
 
         if (this.isMarkdownFile(file)) {
           void this.refreshFileIssueState(file);
@@ -367,7 +452,8 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
 
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        this.issueCounts.delete(file.path);
+        this.markdownIssueCounts.delete(file.path);
+        this.quoteIssueCounts.delete(file.path);
         this.refreshUi();
       }),
     );
@@ -384,7 +470,10 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
   getProblemFiles(): Array<{ file: TFile; count: number }> {
     return this.app.vault
       .getMarkdownFiles()
-      .map((file) => ({ file, count: this.issueCounts.get(file.path) ?? 0 }))
+      .map((file) => ({
+        file,
+        count: (this.markdownIssueCounts.get(file.path) ?? 0) + (this.quoteIssueCounts.get(file.path) ?? 0),
+      }))
       .filter((item) => item.count > 0)
       .sort((a, b) => b.count - a.count || a.file.path.localeCompare(b.file.path));
   }
@@ -408,26 +497,60 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
     await this.convertFiles(files);
   }
 
+  async scanQuotesInVault(): Promise<void> {
+    const files = this.app.vault.getMarkdownFiles();
+    await this.scanQuoteFiles(files);
+  }
+
+  async convertQuotesInVault(): Promise<void> {
+    const files = this.app.vault.getMarkdownFiles();
+    await this.convertQuoteFiles(files);
+  }
+
   async convertFile(file: TFile): Promise<void> {
     const content = await this.app.vault.read(file);
     const result = convertMarkdownFormatting(content);
 
     if (result.count === 0) {
-      this.issueCounts.set(file.path, 0);
+      this.markdownIssueCounts.set(file.path, 0);
       this.refreshUi();
       new Notice("Nothing to convert in the current note.");
       return;
     }
 
     await this.app.vault.modify(file, result.value);
-    this.issueCounts.set(file.path, 0);
+    this.markdownIssueCounts.set(file.path, 0);
+    const quotesResult = convertStraightQuotes(result.value);
+    this.quoteIssueCounts.set(file.path, quotesResult.count);
     this.refreshUi();
     new Notice(`Converted ${result.count} markdown formatting fragment(s) to HTML tags.`);
   }
 
-  async openFileAtFirstIssue(file: TFile): Promise<void> {
+  async convertQuotesInFile(file: TFile): Promise<void> {
     const content = await this.app.vault.read(file);
-    const matchLocation = findFirstMatchLocation(content);
+    const result = convertStraightQuotes(content);
+
+    if (result.count === 0) {
+      this.quoteIssueCounts.set(file.path, 0);
+      this.refreshUi();
+      new Notice("No straight quotes to convert in the current note.");
+      return;
+    }
+
+    await this.app.vault.modify(file, result.value);
+    this.quoteIssueCounts.set(file.path, 0);
+    const markdownResult = convertMarkdownFormatting(result.value);
+    this.markdownIssueCounts.set(file.path, markdownResult.count);
+    this.refreshUi();
+    new Notice(`Converted ${result.count} straight quote fragment(s) to guillemets.`);
+  }
+
+  async openFileAtFirstIssue(file: TFile, issueType: IssueType = "markdown"): Promise<void> {
+    const content = await this.app.vault.read(file);
+    const matchLocation = findFirstMatchLocation(
+      content,
+      issueType === "markdown" ? MARKDOWN_MATCHERS : QUOTE_MATCHERS,
+    );
     const leaf = this.app.workspace.getLeaf(true);
 
     await leaf.openFile(file);
@@ -494,6 +617,26 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
           void this.convertFile(file);
         });
     });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Scan straight quotes")
+        .setIcon("search")
+        .setSection("md-to-html-quotes")
+        .onClick(() => {
+          void this.scanQuotesInFile(file);
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Convert straight quotes to guillemets")
+        .setIcon("quote-glyph")
+        .setSection("md-to-html-quotes")
+        .onClick(() => {
+          void this.convertQuotesInFile(file);
+        });
+    });
   }
 
   private addFilesMenuItems(menu: Menu, files: TAbstractFile[]): void {
@@ -522,16 +665,41 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
           void this.convertFiles(markdownFiles);
         });
     });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Scan straight quotes in selected notes")
+        .setIcon("search")
+        .setSection("md-to-html-quotes")
+        .onClick(() => {
+          void this.scanQuoteFiles(markdownFiles);
+        });
+    });
+
+    menu.addItem((item) => {
+      item
+        .setTitle("Convert straight quotes to guillemets in selected notes")
+        .setIcon("quote-glyph")
+        .setSection("md-to-html-quotes")
+        .onClick(() => {
+          void this.convertQuoteFiles(markdownFiles);
+        });
+    });
   }
 
-  private async analyzeFile(file: TFile): Promise<MatchInfo> {
+  private async analyzeMarkdownFile(file: TFile): Promise<MatchInfo> {
     const content = await this.app.vault.read(file);
     return convertMarkdownFormatting(content);
   }
 
+  private async analyzeQuoteFile(file: TFile): Promise<MatchInfo> {
+    const content = await this.app.vault.read(file);
+    return convertStraightQuotes(content);
+  }
+
   private async scanFile(file: TFile): Promise<void> {
-    const result = await this.analyzeFile(file);
-    this.issueCounts.set(file.path, result.count);
+    const result = await this.analyzeMarkdownFile(file);
+    this.markdownIssueCounts.set(file.path, result.count);
     this.refreshUi();
 
     if (result.count === 0) {
@@ -547,8 +715,8 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
     let totalMatches = 0;
 
     for (const file of files) {
-      const result = await this.analyzeFile(file);
-      this.issueCounts.set(file.path, result.count);
+      const result = await this.analyzeMarkdownFile(file);
+      this.markdownIssueCounts.set(file.path, result.count);
 
       if (result.count > 0) {
         affectedFiles += 1;
@@ -575,12 +743,14 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
       const result = convertMarkdownFormatting(content);
 
       if (result.count === 0) {
-        this.issueCounts.set(file.path, 0);
+        this.markdownIssueCounts.set(file.path, 0);
         continue;
       }
 
       await this.app.vault.modify(file, result.value);
-      this.issueCounts.set(file.path, 0);
+      this.markdownIssueCounts.set(file.path, 0);
+      const quotesResult = convertStraightQuotes(result.value);
+      this.quoteIssueCounts.set(file.path, quotesResult.count);
       changedFiles += 1;
       totalMatches += result.count;
     }
@@ -595,12 +765,82 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
     new Notice(`Converted ${totalMatches} fragment(s) in ${changedFiles} selected note(s).`, 8000);
   }
 
+  private async scanQuotesInFile(file: TFile): Promise<void> {
+    const result = await this.analyzeQuoteFile(file);
+    this.quoteIssueCounts.set(file.path, result.count);
+    this.refreshUi();
+
+    if (result.count === 0) {
+      new Notice("No straight quotes found in the current note.");
+      return;
+    }
+
+    new Notice(`Found ${result.count} straight quote fragment(s) in the current note.`);
+  }
+
+  private async scanQuoteFiles(files: TFile[]): Promise<void> {
+    let affectedFiles = 0;
+    let totalMatches = 0;
+
+    for (const file of files) {
+      const result = await this.analyzeQuoteFile(file);
+      this.quoteIssueCounts.set(file.path, result.count);
+
+      if (result.count > 0) {
+        affectedFiles += 1;
+        totalMatches += result.count;
+      }
+    }
+
+    this.refreshUi();
+
+    if (totalMatches === 0) {
+      new Notice("No straight quotes found in selected notes.");
+      return;
+    }
+
+    new Notice(`Found ${totalMatches} straight quote issue(s) in ${affectedFiles} selected note(s).`, 8000);
+  }
+
+  private async convertQuoteFiles(files: TFile[]): Promise<void> {
+    let changedFiles = 0;
+    let totalMatches = 0;
+
+    for (const file of files) {
+      const content = await this.app.vault.read(file);
+      const result = convertStraightQuotes(content);
+
+      if (result.count === 0) {
+        this.quoteIssueCounts.set(file.path, 0);
+        continue;
+      }
+
+      await this.app.vault.modify(file, result.value);
+      this.quoteIssueCounts.set(file.path, 0);
+      const markdownResult = convertMarkdownFormatting(result.value);
+      this.markdownIssueCounts.set(file.path, markdownResult.count);
+      changedFiles += 1;
+      totalMatches += result.count;
+    }
+
+    this.refreshUi();
+
+    if (totalMatches === 0) {
+      new Notice("No straight quotes to convert in selected notes.");
+      return;
+    }
+
+    new Notice(`Converted ${totalMatches} straight quote fragment(s) in ${changedFiles} selected note(s).`, 8000);
+  }
+
   private async rebuildIssueCache(): Promise<void> {
     const files = this.app.vault.getMarkdownFiles();
 
     for (const file of files) {
-      const result = await this.analyzeFile(file);
-      this.issueCounts.set(file.path, result.count);
+      const markdownResult = await this.analyzeMarkdownFile(file);
+      const quoteResult = await this.analyzeQuoteFile(file);
+      this.markdownIssueCounts.set(file.path, markdownResult.count);
+      this.quoteIssueCounts.set(file.path, quoteResult.count);
     }
   }
 
@@ -617,7 +857,7 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
     }
 
     for (const path of paths) {
-      if (this.issueCounts.has(path)) {
+      if (this.markdownIssueCounts.has(path) && this.quoteIssueCounts.has(path)) {
         continue;
       }
 
@@ -627,16 +867,20 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
         continue;
       }
 
-      const result = await this.analyzeFile(file);
-      this.issueCounts.set(file.path, result.count);
+      const markdownResult = await this.analyzeMarkdownFile(file);
+      const quoteResult = await this.analyzeQuoteFile(file);
+      this.markdownIssueCounts.set(file.path, markdownResult.count);
+      this.quoteIssueCounts.set(file.path, quoteResult.count);
     }
 
     this.refreshExplorerBadges();
   }
 
   private async refreshFileIssueState(file: TFile): Promise<void> {
-    const result = await this.analyzeFile(file);
-    this.issueCounts.set(file.path, result.count);
+    const markdownResult = await this.analyzeMarkdownFile(file);
+    const quoteResult = await this.analyzeQuoteFile(file);
+    this.markdownIssueCounts.set(file.path, markdownResult.count);
+    this.quoteIssueCounts.set(file.path, quoteResult.count);
     this.refreshUi();
   }
 
@@ -655,61 +899,81 @@ export default class MdToHtmlItalicsCheckerPlugin extends Plugin {
         continue;
       }
 
-      const count = this.issueCounts.get(path) ?? 0;
-      const existingBadge = element.querySelector<HTMLElement>(`.${BADGE_CLASS}`);
+      const markdownCount = this.markdownIssueCounts.get(path) ?? 0;
+      const quoteCount = this.quoteIssueCounts.get(path) ?? 0;
 
-      if (count <= 0) {
-        existingBadge?.remove();
-        continue;
-      }
-
-      if (existingBadge) {
-        existingBadge.setAttribute("aria-label", `${count} markdown formatting issues`);
-        existingBadge.title = `${count} markdown formatting issue(s)`;
-        existingBadge.lastChild?.remove();
-        existingBadge.append(String(count));
-        continue;
-      }
-
-      const badge = document.createElement("span");
-      badge.className = BADGE_CLASS;
-      badge.setAttribute("aria-label", `${count} markdown formatting issues`);
-      badge.title = `${count} markdown formatting issue(s)`;
-      badge.setAttribute("role", "button");
-      badge.tabIndex = 0;
-      badge.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-
-        const file = this.app.vault.getAbstractFileByPath(path);
-
-        if (this.isMarkdownFile(file)) {
-          void this.openFileAtFirstIssue(file);
-        }
-      });
-      badge.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") {
-          return;
-        }
-
-        event.preventDefault();
-        event.stopPropagation();
-
-        const file = this.app.vault.getAbstractFileByPath(path);
-
-        if (this.isMarkdownFile(file)) {
-          void this.openFileAtFirstIssue(file);
-        }
-      });
-
-      const iconWrapper = document.createElement("span");
-      iconWrapper.className = `${BADGE_CLASS}-icon`;
-      setIcon(iconWrapper, "alert-circle");
-      badge.appendChild(iconWrapper);
-      badge.append(String(count));
-
-      element.appendChild(badge);
+      this.renderExplorerBadge(element, path, "markdown", markdownCount);
+      this.renderExplorerBadge(element, path, "quotes", quoteCount);
     }
+  }
+
+  private renderExplorerBadge(
+    element: HTMLElement,
+    path: string,
+    issueType: IssueType,
+    count: number,
+  ): void {
+    const badgeSelector = `.${BADGE_CLASS}[data-issue-type="${issueType}"]`;
+    const existingBadge = element.querySelector<HTMLElement>(badgeSelector);
+
+    if (count <= 0) {
+      existingBadge?.remove();
+      return;
+    }
+
+    if (existingBadge) {
+      existingBadge.setAttribute("aria-label", `${count} ${issueType} issues`);
+      existingBadge.title =
+        issueType === "markdown"
+          ? `${count} markdown formatting issue(s)`
+          : `${count} straight quote issue(s)`;
+      existingBadge.lastChild?.remove();
+      existingBadge.append(String(count));
+      return;
+    }
+
+    const badge = document.createElement("span");
+    badge.className = `${BADGE_CLASS} ${BADGE_CLASS}--${issueType}`;
+    badge.dataset.issueType = issueType;
+    badge.setAttribute("aria-label", `${count} ${issueType} issues`);
+    badge.title =
+      issueType === "markdown"
+        ? `${count} markdown formatting issue(s)`
+        : `${count} straight quote issue(s)`;
+    badge.setAttribute("role", "button");
+    badge.tabIndex = 0;
+    badge.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const file = this.app.vault.getAbstractFileByPath(path);
+
+      if (this.isMarkdownFile(file)) {
+        void this.openFileAtFirstIssue(file, issueType);
+      }
+    });
+    badge.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const file = this.app.vault.getAbstractFileByPath(path);
+
+      if (this.isMarkdownFile(file)) {
+        void this.openFileAtFirstIssue(file, issueType);
+      }
+    });
+
+    const iconWrapper = document.createElement("span");
+    iconWrapper.className = `${BADGE_CLASS}-icon`;
+    setIcon(iconWrapper, issueType === "markdown" ? "alert-circle" : "quote-glyph");
+    badge.appendChild(iconWrapper);
+    badge.append(String(count));
+
+    element.appendChild(badge);
   }
 
   private refreshOpenReportViews(): void {

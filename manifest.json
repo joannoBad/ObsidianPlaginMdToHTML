@@ -3,7 +3,7 @@
   "name": "MD To HTML Italics Checker",
   "version": "0.2.0",
   "minAppVersion": "1.5.0",
-  "description": "Scans Obsidian notes for underscore-based markdown italics and bold text and converts them to HTML tags.",
+  "description": "Scans Obsidian notes for markdown italics, bold text, and straight double quotes and converts them to HTML tags and guillemets.",
   "author": "joannoBad",
   "authorUrl": "https://github.com/joannoBad",
   "isDesktopOnly": false

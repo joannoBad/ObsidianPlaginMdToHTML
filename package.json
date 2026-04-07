@@ -1,7 +1,7 @@
 {
   "name": "obsidian-plugin-md-to-html",
   "version": "0.2.0",
-  "description": "Obsidian plugin that finds markdown italics and bold formatting and converts it to HTML tags.",
+  "description": "Obsidian plugin that finds markdown italics, bold formatting, and straight double quotes and converts them to HTML tags and guillemets.",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

@@ -31,9 +31,12 @@ var INLINE_CODE_PATTERN = /(`[^`]*`)/g;
 var BOLD_PATTERN = /(^|[^\\*])\*\*([^*\n]+?)\*\*(?=($|[^\\*]))/g;
 var ASTERISK_ITALIC_PATTERN = /(^|[^\\*])\*([^*\n]+?)\*(?=($|[^\\*]))/g;
 var UNDERSCORE_ITALIC_PATTERN = /(^|[^\\\w])_([^_\n]+?)_(?=($|[^\w]))/g;
+var QUOTE_PATTERN = /(^|[^\\"])"([^"\n]+?)"(?=($|[^\\"]))/g;
 var BADGE_CLASS = "md-to-html-issue-badge";
 var REPORT_VIEW_TYPE = "md-to-html-report-view";
-function convertSegment(segment) {
+var MARKDOWN_MATCHERS = [BOLD_PATTERN, ASTERISK_ITALIC_PATTERN, UNDERSCORE_ITALIC_PATTERN];
+var QUOTE_MATCHERS = [QUOTE_PATTERN];
+function convertMarkdownSegment(segment) {
   let count = 0;
   const boldConverted = segment.replace(
     BOLD_PATTERN,
@@ -58,7 +61,18 @@ function convertSegment(segment) {
   );
   return { count, value };
 }
-function convertMarkdownFormatting(text) {
+function convertQuoteSegment(segment) {
+  let count = 0;
+  const value = segment.replace(
+    QUOTE_PATTERN,
+    (fullMatch, prefix, content) => {
+      count += 1;
+      return `${prefix}\xAB${content}\xBB`;
+    }
+  );
+  return { count, value };
+}
+function transformText(text, segmentTransformer) {
   const lines = text.split("\n");
   let insideFence = false;
   let totalCount = 0;
@@ -75,7 +89,7 @@ function convertMarkdownFormatting(text) {
       if (part.startsWith("`") && part.endsWith("`")) {
         return part;
       }
-      const result = convertSegment(part);
+      const result = segmentTransformer(part);
       totalCount += result.count;
       return result.value;
     });
@@ -86,7 +100,13 @@ function convertMarkdownFormatting(text) {
     value: convertedLines.join("\n")
   };
 }
-function findFirstMatchLocation(text) {
+function convertMarkdownFormatting(text) {
+  return transformText(text, convertMarkdownSegment);
+}
+function convertStraightQuotes(text) {
+  return transformText(text, convertQuoteSegment);
+}
+function findFirstMatchLocation(text, matchers) {
   const lines = text.split("\n");
   let insideFence = false;
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
@@ -106,7 +126,7 @@ function findFirstMatchLocation(text) {
       if (part.startsWith("`") && part.endsWith("`")) {
         continue;
       }
-      const matches = [BOLD_PATTERN, ASTERISK_ITALIC_PATTERN, UNDERSCORE_ITALIC_PATTERN].map((matcher) => {
+      const matches = matchers.map((matcher) => {
         matcher.lastIndex = 0;
         const match = matcher.exec(part);
         if (!match || match.index === void 0) {
@@ -119,7 +139,8 @@ function findFirstMatchLocation(text) {
         const prefix = firstMatch.match[1] ?? "";
         const content = firstMatch.match[2] ?? "";
         const startCh = partStart + firstMatch.match.index + prefix.length;
-        const endCh = startCh + content.length + (firstMatch.matcher === BOLD_PATTERN ? 4 : 2);
+        const wrapperLength = firstMatch.matcher === BOLD_PATTERN ? 4 : 2;
+        const endCh = startCh + content.length + wrapperLength;
         return {
           from: { line: lineIndex, ch: startCh },
           to: { line: lineIndex, ch: endCh }
@@ -213,7 +234,8 @@ var MdToHtmlReportView = class extends import_obsidian.ItemView {
 var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
-    this.issueCounts = /* @__PURE__ */ new Map();
+    this.markdownIssueCounts = /* @__PURE__ */ new Map();
+    this.quoteIssueCounts = /* @__PURE__ */ new Map();
   }
   async onload() {
     this.registerView(
@@ -272,6 +294,48 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
         void this.convertVault();
       }
     });
+    this.addCommand({
+      id: "scan-current-note-straight-quotes",
+      name: "Scan current note for straight quotes",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!this.isMarkdownFile(file)) {
+          return false;
+        }
+        if (!checking) {
+          void this.scanQuotesInFile(file);
+        }
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "convert-current-note-straight-quotes",
+      name: "Convert straight quotes in current note to guillemets",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!this.isMarkdownFile(file)) {
+          return false;
+        }
+        if (!checking) {
+          void this.convertQuotesInFile(file);
+        }
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "scan-vault-straight-quotes",
+      name: "Scan all notes in vault for straight quotes",
+      callback: () => {
+        void this.scanQuotesInVault();
+      }
+    });
+    this.addCommand({
+      id: "convert-vault-straight-quotes",
+      name: "Convert straight quotes to guillemets in all notes",
+      callback: () => {
+        void this.convertQuotesInVault();
+      }
+    });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
         this.addFileMenuItems(menu, file);
@@ -298,7 +362,8 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        this.issueCounts.delete(oldPath);
+        this.markdownIssueCounts.delete(oldPath);
+        this.quoteIssueCounts.delete(oldPath);
         if (this.isMarkdownFile(file)) {
           void this.refreshFileIssueState(file);
           return;
@@ -308,7 +373,8 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        this.issueCounts.delete(file.path);
+        this.markdownIssueCounts.delete(file.path);
+        this.quoteIssueCounts.delete(file.path);
         this.refreshUi();
       })
     );
@@ -320,7 +386,10 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
     await this.detachLeavesOfType(REPORT_VIEW_TYPE);
   }
   getProblemFiles() {
-    return this.app.vault.getMarkdownFiles().map((file) => ({ file, count: this.issueCounts.get(file.path) ?? 0 })).filter((item) => item.count > 0).sort((a, b) => b.count - a.count || a.file.path.localeCompare(b.file.path));
+    return this.app.vault.getMarkdownFiles().map((file) => ({
+      file,
+      count: (this.markdownIssueCounts.get(file.path) ?? 0) + (this.quoteIssueCounts.get(file.path) ?? 0)
+    })).filter((item) => item.count > 0).sort((a, b) => b.count - a.count || a.file.path.localeCompare(b.file.path));
   }
   async openFile(file) {
     await this.openFileAtFirstIssue(file);
@@ -337,23 +406,52 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
     const files = this.app.vault.getMarkdownFiles();
     await this.convertFiles(files);
   }
+  async scanQuotesInVault() {
+    const files = this.app.vault.getMarkdownFiles();
+    await this.scanQuoteFiles(files);
+  }
+  async convertQuotesInVault() {
+    const files = this.app.vault.getMarkdownFiles();
+    await this.convertQuoteFiles(files);
+  }
   async convertFile(file) {
     const content = await this.app.vault.read(file);
     const result = convertMarkdownFormatting(content);
     if (result.count === 0) {
-      this.issueCounts.set(file.path, 0);
+      this.markdownIssueCounts.set(file.path, 0);
       this.refreshUi();
       new import_obsidian.Notice("Nothing to convert in the current note.");
       return;
     }
     await this.app.vault.modify(file, result.value);
-    this.issueCounts.set(file.path, 0);
+    this.markdownIssueCounts.set(file.path, 0);
+    const quotesResult = convertStraightQuotes(result.value);
+    this.quoteIssueCounts.set(file.path, quotesResult.count);
     this.refreshUi();
     new import_obsidian.Notice(`Converted ${result.count} markdown formatting fragment(s) to HTML tags.`);
   }
-  async openFileAtFirstIssue(file) {
+  async convertQuotesInFile(file) {
     const content = await this.app.vault.read(file);
-    const matchLocation = findFirstMatchLocation(content);
+    const result = convertStraightQuotes(content);
+    if (result.count === 0) {
+      this.quoteIssueCounts.set(file.path, 0);
+      this.refreshUi();
+      new import_obsidian.Notice("No straight quotes to convert in the current note.");
+      return;
+    }
+    await this.app.vault.modify(file, result.value);
+    this.quoteIssueCounts.set(file.path, 0);
+    const markdownResult = convertMarkdownFormatting(result.value);
+    this.markdownIssueCounts.set(file.path, markdownResult.count);
+    this.refreshUi();
+    new import_obsidian.Notice(`Converted ${result.count} straight quote fragment(s) to guillemets.`);
+  }
+  async openFileAtFirstIssue(file, issueType = "markdown") {
+    const content = await this.app.vault.read(file);
+    const matchLocation = findFirstMatchLocation(
+      content,
+      issueType === "markdown" ? MARKDOWN_MATCHERS : QUOTE_MATCHERS
+    );
     const leaf = this.app.workspace.getLeaf(true);
     await leaf.openFile(file);
     await this.app.workspace.revealLeaf(leaf);
@@ -401,6 +499,16 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
         void this.convertFile(file);
       });
     });
+    menu.addItem((item) => {
+      item.setTitle("Scan straight quotes").setIcon("search").setSection("md-to-html-quotes").onClick(() => {
+        void this.scanQuotesInFile(file);
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Convert straight quotes to guillemets").setIcon("quote-glyph").setSection("md-to-html-quotes").onClick(() => {
+        void this.convertQuotesInFile(file);
+      });
+    });
   }
   addFilesMenuItems(menu, files) {
     const markdownFiles = files.filter((file) => this.isMarkdownFile(file));
@@ -417,14 +525,28 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
         void this.convertFiles(markdownFiles);
       });
     });
+    menu.addItem((item) => {
+      item.setTitle("Scan straight quotes in selected notes").setIcon("search").setSection("md-to-html-quotes").onClick(() => {
+        void this.scanQuoteFiles(markdownFiles);
+      });
+    });
+    menu.addItem((item) => {
+      item.setTitle("Convert straight quotes to guillemets in selected notes").setIcon("quote-glyph").setSection("md-to-html-quotes").onClick(() => {
+        void this.convertQuoteFiles(markdownFiles);
+      });
+    });
   }
-  async analyzeFile(file) {
+  async analyzeMarkdownFile(file) {
     const content = await this.app.vault.read(file);
     return convertMarkdownFormatting(content);
   }
+  async analyzeQuoteFile(file) {
+    const content = await this.app.vault.read(file);
+    return convertStraightQuotes(content);
+  }
   async scanFile(file) {
-    const result = await this.analyzeFile(file);
-    this.issueCounts.set(file.path, result.count);
+    const result = await this.analyzeMarkdownFile(file);
+    this.markdownIssueCounts.set(file.path, result.count);
     this.refreshUi();
     if (result.count === 0) {
       new import_obsidian.Notice("No markdown italics or bold fragments found in the current note.");
@@ -436,8 +558,8 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
     let affectedFiles = 0;
     let totalMatches = 0;
     for (const file of files) {
-      const result = await this.analyzeFile(file);
-      this.issueCounts.set(file.path, result.count);
+      const result = await this.analyzeMarkdownFile(file);
+      this.markdownIssueCounts.set(file.path, result.count);
       if (result.count > 0) {
         affectedFiles += 1;
         totalMatches += result.count;
@@ -457,11 +579,13 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
       const content = await this.app.vault.read(file);
       const result = convertMarkdownFormatting(content);
       if (result.count === 0) {
-        this.issueCounts.set(file.path, 0);
+        this.markdownIssueCounts.set(file.path, 0);
         continue;
       }
       await this.app.vault.modify(file, result.value);
-      this.issueCounts.set(file.path, 0);
+      this.markdownIssueCounts.set(file.path, 0);
+      const quotesResult = convertStraightQuotes(result.value);
+      this.quoteIssueCounts.set(file.path, quotesResult.count);
       changedFiles += 1;
       totalMatches += result.count;
     }
@@ -472,11 +596,65 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
     }
     new import_obsidian.Notice(`Converted ${totalMatches} fragment(s) in ${changedFiles} selected note(s).`, 8e3);
   }
+  async scanQuotesInFile(file) {
+    const result = await this.analyzeQuoteFile(file);
+    this.quoteIssueCounts.set(file.path, result.count);
+    this.refreshUi();
+    if (result.count === 0) {
+      new import_obsidian.Notice("No straight quotes found in the current note.");
+      return;
+    }
+    new import_obsidian.Notice(`Found ${result.count} straight quote fragment(s) in the current note.`);
+  }
+  async scanQuoteFiles(files) {
+    let affectedFiles = 0;
+    let totalMatches = 0;
+    for (const file of files) {
+      const result = await this.analyzeQuoteFile(file);
+      this.quoteIssueCounts.set(file.path, result.count);
+      if (result.count > 0) {
+        affectedFiles += 1;
+        totalMatches += result.count;
+      }
+    }
+    this.refreshUi();
+    if (totalMatches === 0) {
+      new import_obsidian.Notice("No straight quotes found in selected notes.");
+      return;
+    }
+    new import_obsidian.Notice(`Found ${totalMatches} straight quote issue(s) in ${affectedFiles} selected note(s).`, 8e3);
+  }
+  async convertQuoteFiles(files) {
+    let changedFiles = 0;
+    let totalMatches = 0;
+    for (const file of files) {
+      const content = await this.app.vault.read(file);
+      const result = convertStraightQuotes(content);
+      if (result.count === 0) {
+        this.quoteIssueCounts.set(file.path, 0);
+        continue;
+      }
+      await this.app.vault.modify(file, result.value);
+      this.quoteIssueCounts.set(file.path, 0);
+      const markdownResult = convertMarkdownFormatting(result.value);
+      this.markdownIssueCounts.set(file.path, markdownResult.count);
+      changedFiles += 1;
+      totalMatches += result.count;
+    }
+    this.refreshUi();
+    if (totalMatches === 0) {
+      new import_obsidian.Notice("No straight quotes to convert in selected notes.");
+      return;
+    }
+    new import_obsidian.Notice(`Converted ${totalMatches} straight quote fragment(s) in ${changedFiles} selected note(s).`, 8e3);
+  }
   async rebuildIssueCache() {
     const files = this.app.vault.getMarkdownFiles();
     for (const file of files) {
-      const result = await this.analyzeFile(file);
-      this.issueCounts.set(file.path, result.count);
+      const markdownResult = await this.analyzeMarkdownFile(file);
+      const quoteResult = await this.analyzeQuoteFile(file);
+      this.markdownIssueCounts.set(file.path, markdownResult.count);
+      this.quoteIssueCounts.set(file.path, quoteResult.count);
     }
   }
   async refreshVisibleExplorerFiles() {
@@ -489,21 +667,25 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
       }
     }
     for (const path of paths) {
-      if (this.issueCounts.has(path)) {
+      if (this.markdownIssueCounts.has(path) && this.quoteIssueCounts.has(path)) {
         continue;
       }
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!this.isMarkdownFile(file)) {
         continue;
       }
-      const result = await this.analyzeFile(file);
-      this.issueCounts.set(file.path, result.count);
+      const markdownResult = await this.analyzeMarkdownFile(file);
+      const quoteResult = await this.analyzeQuoteFile(file);
+      this.markdownIssueCounts.set(file.path, markdownResult.count);
+      this.quoteIssueCounts.set(file.path, quoteResult.count);
     }
     this.refreshExplorerBadges();
   }
   async refreshFileIssueState(file) {
-    const result = await this.analyzeFile(file);
-    this.issueCounts.set(file.path, result.count);
+    const markdownResult = await this.analyzeMarkdownFile(file);
+    const quoteResult = await this.analyzeQuoteFile(file);
+    this.markdownIssueCounts.set(file.path, markdownResult.count);
+    this.quoteIssueCounts.set(file.path, quoteResult.count);
     this.refreshUi();
   }
   refreshUi() {
@@ -517,51 +699,58 @@ var MdToHtmlItalicsCheckerPlugin = class extends import_obsidian.Plugin {
       if (!path) {
         continue;
       }
-      const count = this.issueCounts.get(path) ?? 0;
-      const existingBadge = element.querySelector(`.${BADGE_CLASS}`);
-      if (count <= 0) {
-        existingBadge?.remove();
-        continue;
-      }
-      if (existingBadge) {
-        existingBadge.setAttribute("aria-label", `${count} markdown formatting issues`);
-        existingBadge.title = `${count} markdown formatting issue(s)`;
-        existingBadge.lastChild?.remove();
-        existingBadge.append(String(count));
-        continue;
-      }
-      const badge = document.createElement("span");
-      badge.className = BADGE_CLASS;
-      badge.setAttribute("aria-label", `${count} markdown formatting issues`);
-      badge.title = `${count} markdown formatting issue(s)`;
-      badge.setAttribute("role", "button");
-      badge.tabIndex = 0;
-      badge.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (this.isMarkdownFile(file)) {
-          void this.openFileAtFirstIssue(file);
-        }
-      });
-      badge.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") {
-          return;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (this.isMarkdownFile(file)) {
-          void this.openFileAtFirstIssue(file);
-        }
-      });
-      const iconWrapper = document.createElement("span");
-      iconWrapper.className = `${BADGE_CLASS}-icon`;
-      (0, import_obsidian.setIcon)(iconWrapper, "alert-circle");
-      badge.appendChild(iconWrapper);
-      badge.append(String(count));
-      element.appendChild(badge);
+      const markdownCount = this.markdownIssueCounts.get(path) ?? 0;
+      const quoteCount = this.quoteIssueCounts.get(path) ?? 0;
+      this.renderExplorerBadge(element, path, "markdown", markdownCount);
+      this.renderExplorerBadge(element, path, "quotes", quoteCount);
     }
+  }
+  renderExplorerBadge(element, path, issueType, count) {
+    const badgeSelector = `.${BADGE_CLASS}[data-issue-type="${issueType}"]`;
+    const existingBadge = element.querySelector(badgeSelector);
+    if (count <= 0) {
+      existingBadge?.remove();
+      return;
+    }
+    if (existingBadge) {
+      existingBadge.setAttribute("aria-label", `${count} ${issueType} issues`);
+      existingBadge.title = issueType === "markdown" ? `${count} markdown formatting issue(s)` : `${count} straight quote issue(s)`;
+      existingBadge.lastChild?.remove();
+      existingBadge.append(String(count));
+      return;
+    }
+    const badge = document.createElement("span");
+    badge.className = `${BADGE_CLASS} ${BADGE_CLASS}--${issueType}`;
+    badge.dataset.issueType = issueType;
+    badge.setAttribute("aria-label", `${count} ${issueType} issues`);
+    badge.title = issueType === "markdown" ? `${count} markdown formatting issue(s)` : `${count} straight quote issue(s)`;
+    badge.setAttribute("role", "button");
+    badge.tabIndex = 0;
+    badge.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (this.isMarkdownFile(file)) {
+        void this.openFileAtFirstIssue(file, issueType);
+      }
+    });
+    badge.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (this.isMarkdownFile(file)) {
+        void this.openFileAtFirstIssue(file, issueType);
+      }
+    });
+    const iconWrapper = document.createElement("span");
+    iconWrapper.className = `${BADGE_CLASS}-icon`;
+    (0, import_obsidian.setIcon)(iconWrapper, issueType === "markdown" ? "alert-circle" : "quote-glyph");
+    badge.appendChild(iconWrapper);
+    badge.append(String(count));
+    element.appendChild(badge);
   }
   refreshOpenReportViews() {
     const leaves = this.app.workspace.getLeavesOfType(REPORT_VIEW_TYPE);

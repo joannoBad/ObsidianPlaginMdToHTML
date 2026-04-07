@@ -12,6 +12,13 @@
   line-height: 1.4;
 }
 
+.md-to-html-issue-badge--markdown {
+  background-color: var(--color-orange);
+}
+
+.md-to-html-issue-badge--quotes {
+  background-color: var(--color-cyan);
+}
 .md-to-html-issue-badge-icon {
   display: inline-flex;
   align-items: center;
